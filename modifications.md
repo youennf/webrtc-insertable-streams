@@ -12,10 +12,10 @@ Some advantages would be:
 ## Approach
 
 Current proposal is to directly expose ReadableStream and WritableStream on existing RTC objects.
-This has some know drawbacks:
+This has some known drawbacks:
 * The current API makes it natural to do processing on the main thread, which will lead to bad results for real time communication. The API should, by default, remove the need for web developers to do extra work to do the right thing (i.e. do processing on non main threads).
 * ReadableStream can be cloned: page can quickly run out of memory if data is not consumed on all ReadableStream (original and cloned).
-* Transfering a WebRTC ReadableStream may be difficult to optimize, in case ReadableStream is cloned, in case page started to read the ReadableStream. While this might not be impossible to optimize these cases, this adds to the complexity of supporting this API.
+* Transfering a WebRTC ReadableStream may be difficult to optimize, in case ReadableStream is cloned, in case page started to read the ReadableStream. While it might not be impossible to optimize these cases, this adds to the complexity of supporting this API.
 
 It seems best suited to expose TransformStream objects as the the goal of the API is to modify data being transmitted.
 While it requires exposing more APIs, this should provide the following benefits:
