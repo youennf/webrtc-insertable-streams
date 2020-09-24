@@ -62,6 +62,47 @@ pc.ontrack = e => {
 }
 </pre>
 
+4. Do some JavaScript specific processing on the packets using RTCRtpReceiverStream/RTCRtpSenderStream
+
+<pre>
+
+// html file
+const localStream = await navigator.mediaDevices.getUserMedia({video:true});
+const [track] = stream.getTracks();
+
+const pc = new RTCPeerConnection();
+pc.worklet.addModule("worker-module.js")
+
+const videoSender = pc.addTrack(localStream.getVideoTracks()[0], localStream)
+videoSender.transform = pc.worlet.createSenderStream("myNoopSendTransformer");
+videoSender.transform.postMessage("Hello controller");
+videoSender.transform.onmessage = (e) => console.log("Message from video sender transform: " + e.data);
+
+const pc = new RTCPeerConnection();
+pc.ontrack = e => {
+    e.receiver.transform = pc.worlet.createReceiverStream("myNoopReceiveTransformer");
+}
+
+// worker-module.js file content
+function myNoopSendTransformer()
+{
+    return {
+        start : (controller) => { controller.postMessage("Hello transform"); },
+        transform : (frame, controller) => { controller.enqueue(frame) },
+        flush : (controller) => { }
+    };
+}
+
+function myNoopReceiveTransformer()
+{
+    return {
+        start : (controller) => { },
+        transform : (frame, controller) => { controller.enqueue(frame) },
+        flush : (controller) => { }
+    };
+}
+</pre>
+
 ## Additional API
 
 ### Extensions to RTC objects
@@ -136,7 +177,7 @@ RTCRtpSenderStream includes MessageObject;
 
 // Receiver
 [Exposed=RTCWorklet]
-interface RTCRtpReceiverStreammController {
+interface RTCRtpReceiverStreamController {
     undefined enqueue(RTCEncodedFrame chunk);
     undefined requestIntraFrame(); // to the remote encoder.
 };
