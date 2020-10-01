@@ -129,9 +129,9 @@ dictionary SFrameSenderOptions {
 [Exposed=(Window,RTCWorklet)]
 interface SFrameSenderStream : GenericRTCStream {
     constructor(optional SFrameSenderOptions options = { });
-    Promise&lt;undefined&gt; setEncryptionKey(CryptoKey, optional unsigned long long keyID);
+    Promise&lt;undefined&gt; setEncryptionKey(CryptoKey key, optional unsigned long long keyID);
     Promise&lt;undefined&gt; ratchetEncryptionKey();
-    Promise&lt;undefined&gt; setSigningKey(CryptoKey);
+    Promise&lt;undefined&gt; setSigningKey(CryptoKey key);
 };
 
 // Receiver
@@ -140,9 +140,9 @@ dictionary SFrameReceiverOptions {
 [Exposed=(Window,RTCWorklet)]
 interface SFrameReceiverStream : GenericRTCStream {
     constructor(optional SFrameReceiverOptions options = { });
-    Promise&lt;undefined&gt; setEncryptionKey(CryptoKey, optional unsigned long long keyID);
+    Promise&lt;undefined&gt; setEncryptionKey(CryptoKey key, optional unsigned long long keyID);
     Promise&lt;undefined&gt; ratchetEncryptionKey();
-    Promise&lt;undefined&gt; setSigningKey(CryptoKey);
+    Promise&lt;undefined&gt; setSigningKey(CryptoKey key);
 };
 </pre>
 
@@ -152,6 +152,17 @@ Note: this transform stream can be used in various contexts:
 * Used by JS RTC streams as one of the transform (with some limitations, requestIntraFrame in particular).
 
 Plan: define SFrameReceiverStream with the hooks that JS RTC streams expose to web page.
+
+#### Advantages
+
+A native SFrame transform has a number of advantages compared to a JavaScript specific implementation:
+* Security: a SFrame native implementation does not require exposing encryption keys to JavaScript.
+  Secure key managers built on frameworks like MLS could for instance generate CryptoKey that are not extractable.
+* Simplicity: end-to-end encryption is a known use case that is expected to be deployed widely.
+  Providing a native API will be beneficial
+for web developers in terms of ease of use, interoperability and maintenance.
+* Efficiency: introducing JavaScript introduces more flexibility with a potential memory cost.
+  A native SFrame implementation will allow optimizing the implementation in terms of memory and processing.
 
 ### JS RTC Streams
 FIXME: Need more thoughts. Think about moving messaging API to worklet, should we have all the APIs grouped in the controller...
