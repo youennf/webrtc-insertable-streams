@@ -14,7 +14,7 @@ Some advantages would be:
 Current proposal is to directly expose ReadableStream and WritableStream on existing RTC objects.
 This has some known drawbacks:
 * The current API makes it natural to do processing on the main thread, which will lead to bad results for real time communication. The API should, by default, remove the need for web developers to do extra work to do the right thing (i.e. do processing on non main threads).
-* ReadableStream can be cloned: page can quickly run out of memory if data is not consumed on all ReadableStream (original and cloned).
+* ReadableStream can be cloned using ReadableStream.tee: page can quickly run out of memory if data is not consumed on all ReadableStream (original and cloned).
 * Transfering a WebRTC ReadableStream may be difficult to optimize, in case ReadableStream is cloned, in case page started to read the ReadableStream. While it might not be impossible to optimize these cases, this adds to the complexity of supporting this API.
 
 It seems best suited to expose TransformStream objects as the the goal of the API is to modify data being transmitted.
@@ -178,7 +178,6 @@ interface mixin MessageObject {
 interface RTCRtpSenderStreamController {
     undefined enqueue(RTCEncodedFrame chunk);
     undefined requestIntraFrame(); // to the local encoder.
-
 };
 RTCRtpSenderStreamController includes MessageObject;
 
@@ -207,6 +206,49 @@ interface RTCWorklet {
 partial interface RTCPeerConnection {
     Promise&lt;RTCWorklet&gt; createWorklet(DOMString scriptURL);
 };
+</pre>
+
+### Using SFrame transform within a JS transform
+
+A SFrame transform can be used as part of a JS transform since it can be created in a RTCWorklet.
+The SFrame transform can expose additional information through the RTCEncodedVideoFrame objects it produces.
+This allows JS applications to do specific processing, for instance in error cases.
+<pre>
+dictionary RTCSFrameDecryptionMetadata {
+    boolean isKeyUnknown;
+    boolean hasSignature;
+    boolean isValidSigature;
+};
+partial interface RTCEncodedVideoFrame {
+    readonly attribute boolean sframeStatus;
+    RTCSFrameDecryptionMetadata getSFrameDecryptionMetadata();
+};
+</pre>
+<pre>
+// worker-module.js file content
+function mySFrameDecryptionTransformer()
+{
+    return {
+        start : (controller) => {
+            this._sframeTransform = new SFrameReceiverStream();
+            this._sframeTransform.readable.pipeTo(new WritableStream({ write : (frame) => this.processPostDecryption(controller, frame) }));
+        },
+        transform : (frame, controller) => {
+            return this._sframeTransform.writable.enqueue(frame);
+        },
+        processPostDecryption : (controller, frame) => {
+            if (frame.sframeStatus) {
+                // Do specific decrypted frame processing before sending to decoder.
+                ...
+                controller.enqueue(frame);
+                return;
+            }
+            // Handle error case.
+            if (frame.type === "key")
+                controller.requestIntraFrame();
+        }
+    };
+}
 </pre>
 
 ## API already defined in insertable stream spec
@@ -259,4 +301,13 @@ interface RTCEncodedAudioFrame {
 typedef (RTCEncodedAudioFrame or RTCEncodedVideoFrame) RTCEncodedFrame;
 </pre>
 
+## Open questions
 
+* Main thread as a default is not good. Should we go with Worker as a default or Worklet as a default? API overhead of Worklet is not huge, seems more user friendly and allows not relying on optimized stream transfering.
+* Since we are dealing with compressed content, do we worry about zero copy cases?
+* Are we considering the transform to be part of the encoding/decoding or part of the sending/receiving? Fro instance, implementations tend to drop frames if encoder is too slow.
+* If the transform skips a frame (say a KeyFrame), the idea would be for the encoder to encode a new KeyFrame as fast as possible. It is then up to the transform to do that management, is it ok?
+* Should we add the requestIFrame to the exposed encoded frame itself?
+* An encoder/decoder is typically always returning an output. It might be a frame or an error. A transform should probably do the same as the WebRTC pipeline might actually not like that a frame disappeared without being notified of it. Should there be a 'skipped' attribute in the RTCEncodedFrame?
+* The JS transform has two JS entry points (receiving frames and writing frames). In some cases, applications may only use one of those two. That is where exposing ReadableStream and WritableStream might be handy since we could natively pipe the encoder output to the SFrame writable.
+* The JS transform is based on exposing a controller. An alternative would be to expose ReadableStream/WritableStream (off the main thread). Plus probably some additional hooks for instance to request an IFrame. This would allow doing more pipeTo operations between native blocks.
