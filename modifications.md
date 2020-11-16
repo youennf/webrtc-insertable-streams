@@ -39,7 +39,7 @@ const localStream = await navigator.mediaDevices.getUserMedia({video:true});
 const [track] = stream.getTracks();
 const pc = new RTCPeerConnection();
 const videoSender = pc.addTrack(localStream.getVideoTracks()[0], localStream)
-videoSender.transform = new SFrameSenderStream();
+videoSender.transform = new SFrameTransform();
 
 // Do ICE and offer/answer exchange.
 ...
@@ -57,7 +57,7 @@ const sframeKeys = ...
 
 const pc = new RTCPeerConnection();
 pc.ontrack = e => {
-  e.receiver.transform = new SFrameReceiverStream();
+  e.receiver.transform = new SFrameTtansform();
   e.receiver.transform.setEncryptionKey(sframeKeys);
 }
 </pre>
@@ -71,51 +71,49 @@ const localStream = await navigator.mediaDevices.getUserMedia({video:true});
 const [track] = stream.getTracks();
 
 const pc = new RTCPeerConnection();
-pc.worklet.addModule("worker-module.js")
+pc.addModule("worker-module.js")
 
 const videoSender = pc.addTrack(localStream.getVideoTracks()[0], localStream)
-videoSender.transform = pc.worlet.createSenderStream("myNoopSendTransformer");
-videoSender.transform.postMessage("Hello controller");
+videoSender.transform = new RTCRtpScriptTransform(pc, "myNoopSendTransformer");
+videoSender.transform.port.postMessage("Hello controller");
 videoSender.transform.onmessage = (e) => console.log("Message from video sender transform: " + e.data);
 
 const pc = new RTCPeerConnection();
 pc.ontrack = e => {
-    e.receiver.transform = pc.worlet.createReceiverStream("myNoopReceiveTransformer");
+    e.receiver.transform = new RTCRtpScriptTransform(pc, "myNoopReceiveTransformer");
 }
 
 // worker-module.js file content
-function myNoopSendTransformer()
+class myNoopSendTransformer extends RTCRtpScriptTransformer {
 {
-    return {
-        start : (controller) => { controller.postMessage("Hello transform"); },
-        transform : (frame, controller) => { controller.enqueue(frame) },
-        flush : (controller) => { }
-    };
-}
+    constructor() { }
+    start(readableStream, writableStream, controller) {
+        controller.postMessage("Hello Transform");
+        readableStream.pipeTo(writableStream);
+    }
+};
+registerRTCRtpScriptTransformer("myNoopSendTransformer", myNoopSendTransformer);
 
-function myNoopReceiveTransformer()
+class myNoopReceiveTransformer extends RTCRtpScriptTransformer {
 {
-    return {
-        start : (controller) => { },
-        transform : (frame, controller) => { controller.enqueue(frame) },
-        flush : (controller) => { }
-    };
+    constructor() { }
+    start(readableStream, writableStream, controller) {
+        readableStream.pipeTo(writableStream);
+    }
 }
+registerRTCRtpScriptTransformer("myNoopReceiveTransformer", myNoopReceiveTransformer);
 </pre>
 
 ## Additional API
 
 ### Extensions to RTC objects
 <pre>
-interface GenericRTCStream {
-    readonly attribute ReadableStream readable;
-    readonly attribute WritableStream writable;
-};
+typedef (SFrameTransform or RTCRtpScriptTransform) RTCRtpTransform;
 partial interface RTCRtpSender {
-    attribute GenericRTCStream? transform;
+    attribute RTCRtpTransform? transform;
 };
 partial interface RTCRtpReceiver {
-    attribute GenericRTCStream? transform;
+    attribute RTCRtpTransform? transform;
 };
 </pre>
 
@@ -124,25 +122,17 @@ FIXME: Decide whether to expose explicit key IDs. Decide whether to expose optio
 SFrame transforms that could either be used with key management implemented in JS or with some to-be-defined MLS-in-the-browser.
 <pre>
 // Sender
-dictionary SFrameSenderOptions {
+dictionary SFrameTransformOptions {
 };
 [Exposed=(Window,RTCWorklet)]
-interface SFrameSenderStream : GenericRTCStream {
-    constructor(optional SFrameSenderOptions options = { });
-    Promise&lt;undefined&gt; setEncryptionKey(CryptoKey key, optional unsigned long long keyID);
-    Promise&lt;undefined&gt; ratchetEncryptionKey();
-    Promise&lt;undefined&gt; setSigningKey(CryptoKey key);
-};
+interface SFrameTransform {
+    constructor(optional SFrameTransformOptions options = { });
 
-// Receiver
-dictionary SFrameReceiverOptions {
-};
-[Exposed=(Window,RTCWorklet)]
-interface SFrameReceiverStream : GenericRTCStream {
-    constructor(optional SFrameReceiverOptions options = { });
+    readonly attribute ReadableStream readable;
+    readonly attribute WritableStream writable;
+
     Promise&lt;undefined&gt; setEncryptionKey(CryptoKey key, optional unsigned long long keyID);
     Promise&lt;undefined&gt; ratchetEncryptionKey();
-    Promise&lt;undefined&gt; setSigningKey(CryptoKey key);
 };
 </pre>
 
@@ -150,8 +140,6 @@ Note: this transform stream can be used in various contexts:
 * With current RTCInsertableStreams proposal.
 * With proposed RTCRtpSender and RTCRtpReceiver transform attribute.
 * Used by JS RTC streams as one of the transform (with some limitations, requestIntraFrame in particular).
-
-Plan: define SFrameReceiverStream with the hooks that JS RTC streams expose to web page.
 
 #### Advantages
 
@@ -165,46 +153,47 @@ for web developers in terms of ease of use, interoperability and maintenance.
   A native SFrame implementation will allow optimizing the implementation in terms of memory and processing.
 
 ### JS RTC Streams
-FIXME: Need more thoughts. Think about moving messaging API to worklet, should we have all the APIs grouped in the controller...
+FIXME: Need more thoughts. Think about moving messaging API to worklet, should we have all the APIs grouped in the controller, just expose readable, writable streams plus some methods...
 
 <pre>
-interface mixin MessageObject {
-    undefined postMessage(any message, optional sequence<Transferable> transfer);
-    attribute EventHandler onmessage;
+typedef (Worker or RTCPeerConnection) RTCRtpScriptTransformContext;
+
+[Exposed=Window]
+interface RTCRtpScriptTransform {
+    constructor(RTCRtpScriptTransformContext context, DOMString name, optional object transfromOptions);
+
+    readonly attribute MessagePort port;
+    attribute EventHandler onprocessorerror;
 };
 
-// Sender
-[Exposed=RTCWorklet]
-interface RTCRtpSenderStreamController {
-    undefined enqueue(RTCEncodedFrame chunk);
-    undefined requestIntraFrame(); // to the local encoder.
-};
-RTCRtpSenderStreamController includes MessageObject;
+[Exposed=(DedicatedWorker, RTCWorklet)]
+interface RTCRtpScriptTransformer {
+    constructor(optional object transformOptions);
 
-interface RTCRtpSenderStream : GenericRTCStream {
-};
-RTCRtpSenderStream includes MessageObject;
+    undefined start(ReadableStream readableStream, WritableStream writableStream);
 
-// Receiver
-[Exposed=RTCWorklet]
-interface RTCRtpReceiverStreamController {
-    undefined enqueue(RTCEncodedFrame chunk);
-    undefined requestIntraFrame(); // to the remote encoder.
+    readonly attribute RTCRtpScriptTransformController controller;
+    readonly attribute MessagePort port;
 };
-RTCRtpReceiverStreammController includes MessageObject;
 
-interface RTCRtpReceiverStream : GenericRTCStream {
+interface RTCRtpScriptTransformController {
+    undefined requestIntraFrame();
 };
-RTCRtpReceiverStream includes MessageObject;
 
-// RTCPeerConnection
-interface RTCWorklet {
-    Promise&lt;RTCRtpSenderStream&gt; createSenderStream(DOMString name);
-    Promise&lt;RTCRtpReceiverStream&gt; createReceiverStream(DOMString name);
+callback RTCRtpScriptTransformerConstructor = RTCRtpScriptTransformer(optional object transformOptions);
+
+[Exposed=DedicatedWorker]
+partial interface DedicatedWorkerGlobalScope {
+    undefined registerRTCRtpScriptTransformer(DOMString name, RTCRtpScriptTransformerConstructor processorConstructor);
+};
+
+[Exposed=RTCRtpWorklet]
+partial interface RTCRtpWorkletGlobalScope {
+    undefined registerRTCRtpScriptTransformer(DOMString name, RTCRtpScriptTransformerConstructor processorConstructor);
 };
 
 partial interface RTCPeerConnection {
-    Promise&lt;RTCWorklet&gt; createWorklet(DOMString scriptURL);
+    Promise&lt;undefined&gt; addModule(DOMString scriptURL);
 };
 </pre>
 
@@ -228,7 +217,7 @@ partial interface RTCEncodedVideoFrame {
 // worker-module.js file content
 function mySFrameDecryptionTransformer()
 {
-    return {
+    return MyTransformWrapper({
         start : (controller) => {
             this._sframeTransform = new SFrameReceiverStream();
             this._sframeTransform.readable.pipeTo(new WritableStream({ write : (frame) => this.processPostDecryption(controller, frame) }));
@@ -247,7 +236,7 @@ function mySFrameDecryptionTransformer()
             if (frame.type === "key")
                 controller.requestIntraFrame();
         }
-    };
+    });
 }
 </pre>
 
