@@ -74,34 +74,25 @@ const pc = new RTCPeerConnection();
 pc.addModule("worker-module.js")
 
 const videoSender = pc.addTrack(localStream.getVideoTracks()[0], localStream)
-videoSender.transform = new RTCRtpScriptTransform(pc, "myNoopSendTransformer");
-videoSender.transform.port.postMessage("Hello controller");
+videoSender.transform = new RTCRtpScriptTransform(pc, "myNoopTransformer");
+videoSender.transform.port.postMessage("Hello transformer");
 videoSender.transform.onmessage = (e) => console.log("Message from video sender transform: " + e.data);
 
 const pc = new RTCPeerConnection();
 pc.ontrack = e => {
-    e.receiver.transform = new RTCRtpScriptTransform(pc, "myNoopReceiveTransformer");
+    e.receiver.transform = new RTCRtpScriptTransform(pc, "myNoopTransformer");
 }
 
 // worker-module.js file content
-class myNoopSendTransformer extends RTCRtpScriptTransformer {
+class myNoopTransformer extends RTCRtpScriptTransformer {
 {
     constructor() { }
-    start(readableStream, writableStream, controller) {
-        controller.postMessage("Hello Transform");
+    start(readableStream, writableStream) {
+        this.port.postMessage("Hello Transform");
         readableStream.pipeTo(writableStream);
     }
 };
-registerRTCRtpScriptTransformer("myNoopSendTransformer", myNoopSendTransformer);
-
-class myNoopReceiveTransformer extends RTCRtpScriptTransformer {
-{
-    constructor() { }
-    start(readableStream, writableStream, controller) {
-        readableStream.pipeTo(writableStream);
-    }
-}
-registerRTCRtpScriptTransformer("myNoopReceiveTransformer", myNoopReceiveTransformer);
+registerRTCRtpScriptTransformer("myNoopTransformer", myNoopTransformer);
 </pre>
 
 ## Additional API
@@ -118,13 +109,11 @@ partial interface RTCRtpReceiver {
 </pre>
 
 ### SFrame additions
-FIXME: Decide whether to expose explicit key IDs. Decide whether to expose options for encrypting only parts of the stream.
 SFrame transforms that could either be used with key management implemented in JS or with some to-be-defined MLS-in-the-browser.
 <pre>
-// Sender
 dictionary SFrameTransformOptions {
 };
-[Exposed=(Window,RTCWorklet)]
+[Exposed=(Window,DedicatedWorker)]
 interface SFrameTransform {
     constructor(optional SFrameTransformOptions options = { });
 
@@ -137,9 +126,8 @@ interface SFrameTransform {
 </pre>
 
 Note: this transform stream can be used in various contexts:
-* With current RTCInsertableStreams proposal.
-* With proposed RTCRtpSender and RTCRtpReceiver transform attribute.
-* Used by JS RTC streams as one of the transform (with some limitations, requestIntraFrame in particular).
+* Directly with proposed RTCRtpSender and RTCRtpReceiver transform attribute.
+* By JS RTC streams as one of the transform.
 
 #### Advantages
 
@@ -153,30 +141,32 @@ for web developers in terms of ease of use, interoperability and maintenance.
   A native SFrame implementation will allow optimizing the implementation in terms of memory and processing.
 
 ### JS RTC Streams
-FIXME: Need more thoughts. Think about moving messaging API to worklet, should we have all the APIs grouped in the controller, just expose readable, writable streams plus some methods...
-
 <pre>
-typedef (Worker or RTCPeerConnection) RTCRtpScriptTransformContext;
-
 [Exposed=Window]
 interface RTCRtpScriptTransform {
-    constructor(RTCRtpScriptTransformContext context, DOMString name, optional object transfromOptions);
+    constructor(Worker context, DOMString name, optional object transfromOptions);
 
     readonly attribute MessagePort port;
-    attribute EventHandler onprocessorerror;
+    attribute EventHandler onerror;
 };
 
-[Exposed=(DedicatedWorker, RTCWorklet)]
+[Exposed=DedicatedWorker]
 interface RTCRtpScriptTransformer {
     constructor(optional object transformOptions);
 
-    undefined start(ReadableStream readableStream, WritableStream writableStream);
+    undefined start(ReadableStream readableStream, WritableStream writableStream, RTCRtpScriptTransformerContext context);
 
-    readonly attribute RTCRtpScriptTransformController controller;
     readonly attribute MessagePort port;
 };
 
-interface RTCRtpScriptTransformController {
+enum RTCRtpScriptTransformerContextSide { "receiver", "sender" };
+enum RTCRtpScriptTransformerContextMediaType { "audio", "video" };
+
+[Exposed=DedicatedWorker]
+interface RTCRtpScriptTransformerContext {
+    readonly attribute RTCRtpScriptTransformerContextSide side;
+    readonly attribute RTCRtpScriptTransformerContextMediaType mediaType;
+
     undefined requestIntraFrame();
 };
 
@@ -186,58 +176,62 @@ callback RTCRtpScriptTransformerConstructor = RTCRtpScriptTransformer(optional o
 partial interface DedicatedWorkerGlobalScope {
     undefined registerRTCRtpScriptTransformer(DOMString name, RTCRtpScriptTransformerConstructor processorConstructor);
 };
+</pre>
 
-[Exposed=RTCRtpWorklet]
-partial interface RTCRtpWorkletGlobalScope {
-    undefined registerRTCRtpScriptTransformer(DOMString name, RTCRtpScriptTransformerConstructor processorConstructor);
+Potential additions for Worklets:
+<pre>
+partial interface RTCRtpScriptTransform {
+    constructor(RTCPeerConnection context, DOMString name, optional object transfromOptions);
 };
 
 partial interface RTCPeerConnection {
     Promise&lt;undefined&gt; addModule(DOMString scriptURL);
 };
+
+[Exposed=RTCRtpWorklet]
+partial interface RTCRtpWorkletGlobalScope {
+    undefined registerRTCRtpScriptTransformer(DOMString name, RTCRtpScriptTransformerConstructor processorConstructor);
+};
 </pre>
 
 ### Using SFrame transform within a JS transform
 
-A SFrame transform can be used as part of a JS transform since it can be created in a RTCWorklet.
+A SFrame transform can be used as part of a JS transform since it can be created in a script trsansform.
 The SFrame transform can expose additional information through the RTCEncodedVideoFrame objects it produces.
 This allows JS applications to do specific processing, for instance in error cases.
 <pre>
-dictionary RTCSFrameDecryptionMetadata {
-    boolean isKeyUnknown;
-    boolean hasSignature;
-    boolean isValidSigature;
+enum SFrameState { "valid", "missing-key", "invalid", "need-key-frame" };
+partial interface RTCEncodedAudioFrame {
+    readonly attribute SFrameState? sframeState;
 };
 partial interface RTCEncodedVideoFrame {
-    readonly attribute boolean sframeStatus;
-    RTCSFrameDecryptionMetadata getSFrameDecryptionMetadata();
+    readonly attribute SFrameState? sframeState;
 };
 </pre>
 <pre>
 // worker-module.js file content
-function mySFrameDecryptionTransformer()
-{
-    return MyTransformWrapper({
-        start : (controller) => {
-            this._sframeTransform = new SFrameReceiverStream();
-            this._sframeTransform.readable.pipeTo(new WritableStream({ write : (frame) => this.processPostDecryption(controller, frame) }));
-        },
-        transform : (frame, controller) => {
-            return this._sframeTransform.writable.enqueue(frame);
-        },
-        processPostDecryption : (controller, frame) => {
-            if (frame.sframeStatus) {
-                // Do specific decrypted frame processing before sending to decoder.
-                ...
-                controller.enqueue(frame);
-                return;
-            }
-            // Handle error case.
-            if (frame.type === "key")
-                controller.requestIntraFrame();
+class mySFrameDecryptionTransformer extends RTCRtpScriptTransformer {
+    constructor() {
+    }
+    start(readable, writable, context) {
+        this._sframeTransform = new SFrameTransform();
+        this._sframeTransform.readable.pipeTo(new WritableStream({ write : (frame) => this.processPostDecryption(writable, context, frame) }));
+        readable.pipeTo(this._sframeTransform.writable);
+    }
+    processPostDecryption(writable, context, frame) => {
+        if (frame.sframeState === "valid") {
+            // Do specific decrypted frame processing before sending to decoder.
+            ...
+            writable.enqueue(frame);
+            return;
         }
-    });
+        if (frame.sframeState === "need-key-frame") {
+            context.requestIntraFrame();
+            return;
+        }
+    }
 }
+registerRTCRtpScriptTransformer("mySFrameDecryptionTransformer", mySFrameDecryptionTransformer);
 </pre>
 
 ## API already defined in insertable stream spec
@@ -289,14 +283,3 @@ interface RTCEncodedAudioFrame {
 
 typedef (RTCEncodedAudioFrame or RTCEncodedVideoFrame) RTCEncodedFrame;
 </pre>
-
-## Open questions
-
-* Main thread as a default is not good. Should we go with Worker as a default or Worklet as a default? API overhead of Worklet is not huge, seems more user friendly and allows not relying on optimized stream transfering.
-* Since we are dealing with compressed content, do we worry about zero copy cases?
-* Are we considering the transform to be part of the encoding/decoding or part of the sending/receiving? Fro instance, implementations tend to drop frames if encoder is too slow.
-* If the transform skips a frame (say a KeyFrame), the idea would be for the encoder to encode a new KeyFrame as fast as possible. It is then up to the transform to do that management, is it ok?
-* Should we add the requestIFrame to the exposed encoded frame itself?
-* An encoder/decoder is typically always returning an output. It might be a frame or an error. A transform should probably do the same as the WebRTC pipeline might actually not like that a frame disappeared without being notified of it. Should there be a 'skipped' attribute in the RTCEncodedFrame?
-* The JS transform has two JS entry points (receiving frames and writing frames). In some cases, applications may only use one of those two. That is where exposing ReadableStream and WritableStream might be handy since we could natively pipe the encoder output to the SFrame writable.
-* The JS transform is based on exposing a controller. An alternative would be to expose ReadableStream/WritableStream (off the main thread). Plus probably some additional hooks for instance to request an IFrame. This would allow doing more pipeTo operations between native blocks.
